@@ -50,13 +50,16 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
         try:
             if self.consumer_tag:
                 self.channel.basic_cancel(consumer_tag=self.consumer_tag)
-            self.channel.stop_consuming()
+                self.channel.stop_consuming()
 
-        except pika.exceptions.ConnectionClosed as e:
+            # Reboot variable
+            self.consumer_tag = None
+
+        except (pika.exceptions.AMQPConnectionError, pika.exceptions.ConnectionClosed) as e:
             raise MessageMiddlewareDisconnectedError(e)
 
         except Exception as e:
-            raise MessageMiddlewareDisconnectedError(e)
+            raise MessageMiddlewareCloseError(e)
 
     def close(self):
         try:
@@ -98,6 +101,9 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
 
             on_message_callback(body, ack, nack)
 
+        # Can't start consuming without stopping first
+        if self.consumer_tag is not None:
+            raise MessageMiddlewareMessageError("Already consuming")
         try:
             # When a message is recieved
             self.consumer_tag =self.channel.basic_consume(
@@ -124,16 +130,19 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
        
     
     def stop_consuming(self):
+        # Can't start consuming without stopping first
+        if self.consumer_tag is not None:
+            raise MessageMiddlewareMessageError("Already consuming")
         try:
             if self.consumer_tag:
                 self.channel.basic_cancel(consumer_tag=self.consumer_tag)
-            self.channel.stop_consuming()
-
-        except pika.exceptions.ConnectionClosed as e:
+                self.channel.stop_consuming()
+            self.consumer_tag = None
+        except (pika.exceptions.AMQPConnectionError, pika.exceptions.ConnectionClosed) as e:
             raise MessageMiddlewareDisconnectedError(e)
 
         except Exception as e:
-            raise MessageMiddlewareDisconnectedError(e)
+            raise MessageMiddlewareCloseError(e)
 
     def close(self):
         try:
