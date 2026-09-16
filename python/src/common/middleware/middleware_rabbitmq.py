@@ -1,7 +1,5 @@
 import pika
-import random
-import string
-from .middleware import MessageMiddlewareMessageError, MessageMiddlewareQueue, MessageMiddlewareExchange
+from .middleware import MessageMiddlewareMessageError, MessageMiddlewareDisconnectedError, MessageMiddlewareCloseError, MessageMiddlewareQueue, MessageMiddlewareExchange
 
 class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
 
@@ -35,13 +33,18 @@ class MessageMiddlewareQueueRabbitMQ(MessageMiddlewareQueue):
 
             on_message_callback(body, ack, nack)
 
-        # When a message is recieved
-        self.consumer_tag =self.channel.basic_consume(
-            queue = self.queue_name, 
-            on_message_callback=callback
-        )
+        try:
+            # When a message is recieved
+            self.consumer_tag =self.channel.basic_consume(
+                queue = self.queue_name, 
+                on_message_callback=callback
+            )
 
-        self.channel.start_consuming()
+            self.channel.start_consuming()
+        except (pika.exceptions.AMQPConnectionError, pika.exceptions.ConnectionClosed) as e:
+            raise MessageMiddlewareDisconnectedError(e)
+        except Exception as e:
+            raise MessageMiddlewareMessageError(e)
 
     def stop_consuming(self):
         try:
@@ -70,17 +73,73 @@ class MessageMiddlewareExchangeRabbitMQ(MessageMiddlewareExchange):
     def __init__(self, host, exchange_name, routing_keys):
         self.connection = pika.BlockingConnection(pika.ConnectionParameters(host))
         self.channel = self.connection.channel()
+
+        # Exchange declaration
         self.exchange_name = exchange_name
-        self.routing_keys= routing_keys
+        self.routing_keys = routing_keys
+        self.channel.exchange_declare(exchange=self.exchange_name, exchange_type='direct')
+
+        result = self.channel.queue_declare(queue='', exclusive=True)
+        self.private_queue_name = result.method.queue
+
+        self.consumer_tag = None
+        
+        for key in self.routing_keys:
+            self.channel.queue_bind(exchange=self.exchange_name, queue=self.private_queue_name, routing_key=key)
        
     def start_consuming(self, on_message_callback):
-        pass
+        def callback(ch, method, properties, body):
+            # Functions needed for on_message_callback
+            def ack():
+                ch.basic_ack(delivery_tag=method.delivery_tag)
+
+            def nack():
+                ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+
+            on_message_callback(body, ack, nack)
+
+        try:
+            # When a message is recieved
+            self.consumer_tag =self.channel.basic_consume(
+                queue = self.private_queue_name, 
+                on_message_callback=callback
+            )
+
+            self.channel.start_consuming()
+        except (pika.exceptions.AMQPConnectionError, pika.exceptions.ConnectionClosed) as e:
+            raise MessageMiddlewareDisconnectedError(e)
+        except Exception as e:
+            raise MessageMiddlewareMessageError(e)
+
 
     def send(self, message):
-         self.channel.basic_publish(exchange=self.exchange_name, routing_key=self.routing_key, body=message)
+        if not self.routing_keys:
+            raise MessageMiddlewareMessageError("No routing keys configured")
+        try:
+             self.channel.basic_publish(exchange=self.exchange_name, routing_key=self.routing_keys[0], body=message)
+        except pika.exceptions.AMQPConnectionError as e:
+            raise MessageMiddlewareDisconnectedError(e)
+        except Exception as e:
+            raise MessageMiddlewareMessageError(e)
+       
     
     def stop_consuming(self):
-        pass
+        try:
+            if self.consumer_tag:
+                self.channel.basic_cancel(consumer_tag=self.consumer_tag)
+            self.channel.stop_consuming()
+
+        except pika.exceptions.ConnectionClosed as e:
+            raise MessageMiddlewareDisconnectedError(e)
+
+        except Exception as e:
+            raise MessageMiddlewareDisconnectedError(e)
 
     def close(self):
-        pass
+        try:
+            if self.channel.is_open:
+                self.channel.close()
+            if self.connection.is_open:
+                self.connection.close()
+        except Exception as e:
+            raise MessageMiddlewareCloseError(e)
